@@ -6,25 +6,39 @@ receiving the transcript webhook, summarizing with Claude, storing results.
 import os
 import requests
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from summarizer import summarize_transcript
 from db import save_meeting, get_meeting, list_meetings
 
 app = FastAPI(title="Read AI Clone")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 RECALL_API_KEY = os.environ.get("RECALL_API_KEY")
 RECALL_BASE_URL = "https://ap-northeast-1.recall.ai/api/v1"  # Asia (Japan) region
 
+# Where Recall.ai should send the webhook when the meeting is done.
+# In production this is your public backend URL, e.g. https://yourapp.onrender.com/webhook/recall
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "http://localhost:8000/webhook/recall")
 
 
 class JoinMeetingRequest(BaseModel):
-    meeting_url: str
+    meeting_url: str          # any Zoom/Meet/Teams link
     bot_name: str = "Meeting Notetaker"
 
 
 @app.post("/meetings/join")
 def join_meeting(req: JoinMeetingRequest):
+    """
+    Sends a bot into the given meeting URL. Works for Zoom, Google Meet,
+    and Microsoft Teams links automatically - Recall.ai detects the platform.
+    """
     if not RECALL_API_KEY:
         raise HTTPException(500, "RECALL_API_KEY not configured")
 
@@ -54,6 +68,10 @@ def join_meeting(req: JoinMeetingRequest):
 
 @app.post("/webhook/recall")
 async def recall_webhook(request: Request):
+    """
+    Recall.ai calls this URL when events happen (bot joined, recording done,
+    transcript ready, etc). We care mostly about 'transcript.done'.
+    """
     payload = await request.json()
     event = payload.get("event")
     bot_id = payload.get("data", {}).get("bot", {}).get("id")
@@ -74,12 +92,14 @@ async def recall_webhook(request: Request):
 
 
 def fetch_transcript_text(bot_id: str) -> str:
+    """Pulls the finished transcript from Recall.ai for a given bot."""
     resp = requests.get(
         f"{RECALL_BASE_URL}/bot/{bot_id}/transcript",
         headers={"Authorization": f"Token {RECALL_API_KEY}"},
     )
     resp.raise_for_status()
     data = resp.json()
+    # Each entry has speaker + words; join into plain text with speaker labels
     lines = []
     for segment in data:
         speaker = segment.get("speaker", "Unknown")
